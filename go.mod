@@ -1,0 +1,16 @@
+module github.com/imamputra1/idlix-downloader
+
+go 1.26.1
+
+require (
+	github.com/PuerkitoBio/goquery v1.12.0 // indirect
+	github.com/andybalholm/brotli v1.0.6 // indirect
+	github.com/andybalholm/cascadia v1.3.3 // indirect
+	github.com/grafov/m3u8 v0.12.1 // indirect
+	github.com/klauspost/compress v1.17.4 // indirect
+	github.com/refraction-networking/utls v1.8.2 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
+	golang.org/x/crypto v0.49.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+)

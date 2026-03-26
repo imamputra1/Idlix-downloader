@@ -1,0 +1,19 @@
+# .golangci.yml
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # Memaksa setiap error dari Result Pattern dicek
+    - gosimple      # Menyederhanakan konstruksi kode
+    - govet         # Linter standar Go
+    - ineffassign   # Mendeteksi assignment variabel yang tidak berguna
+    - staticcheck   # Analisis statis komprehensif
+    - gocritic      # Memberikan saran best-practices Go
+    - gosec         # Mendeteksi celah keamanan (misal URL injection)
+    - nolintlint    # Memastikan tag //nolint digunakan dengan benar
+
+issues:
+  exclude-use-default: false
