@@ -5,5 +5,5 @@ import (
 )
 
 type CryptoEngine interface {
-	DescryptURL(ciphertext string, secretKey string) result.Result[string]
+	DecryptURL(ciphertext string, secretKey string) result.Result[string]
 }
