@@ -7,7 +7,7 @@ import (
 )
 
 func TestVideoMetadata_CreationAccuracy(t *testing.T) {
-	video := entities.NewVideoMetadata("1", "Title", "enc", "clean")
+	video := entities.NewVideoMetadata("123", "Title", "embed_url", "dummy-key", "clean_url")
 	if video.ID() != "1" || video.Title() != "Title" || video.EncryptedEmbedURL() != "enc" || video.CleanSourceURL() != "clean" {
 		t.Fatal("VideoMetadata immutability or constructor failed")
 	}
@@ -31,7 +31,7 @@ func TestHLSPlaylist_MutationResistance(t *testing.T) {
 
 func TestEntities_ZeroValues(t *testing.T) {
 	t.Run("VideoMetadata Zero Values", func(t *testing.T) {
-		video := entities.NewVideoMetadata("", "", "", "")
+		video := entities.NewVideoMetadata("", "", "", "", "")
 
 		if video.ID() != "" || video.Title() != "" {
 			t.Errorf("Expected empty strings for zero-value VideoMetadata initialization")

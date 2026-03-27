@@ -5,15 +5,17 @@ type VideoMetadata struct {
 	id                string
 	title             string
 	encryptedEmbedURL string
+	decryptionKey     string
 	cleanSourceURL    string
 }
 
 // NewVideoMetadata creates a new immutable VideoMetadata instance.
-func NewVideoMetadata(id, title, encryptedEmbedURL, cleanSourceURL string) VideoMetadata {
+func NewVideoMetadata(id, title, encryptedEmbedURL, decryptionKey, cleanSourceURL string) VideoMetadata {
 	return VideoMetadata{
 		id:                id,
 		title:             title,
 		encryptedEmbedURL: encryptedEmbedURL,
+		decryptionKey:     decryptionKey,
 		cleanSourceURL:    cleanSourceURL,
 	}
 }
@@ -31,6 +33,11 @@ func (v VideoMetadata) Title() string {
 // EncryptedEmbedURL returns the AES encrypted URL.
 func (v VideoMetadata) EncryptedEmbedURL() string {
 	return v.encryptedEmbedURL
+}
+
+// DecryptionKey mengembalikan kunci dekripsi untuk memecahkan ciphertext.
+func (v VideoMetadata) DecryptionKey() string {
+	return v.decryptionKey
 }
 
 // CleanSourceURL returns the decrypted, clean root server URL.

@@ -3,66 +3,38 @@
 package scraper_test
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"net/http/cookiejar"
 	"testing"
-	"time"
 
+	"github.com/imamputra1/idlix-downloader/internal/infrastructure/client"
 	"github.com/imamputra1/idlix-downloader/internal/infrastructure/scraper"
 )
 
-func TestGoQueryScraper_Integration(t *testing.T) {
-	expectedPostID := "98765"
-	expectedCiphertext := "U2FsdGVkX1+vRandomBase64AESCiphertextData=="
+func TestGoQueryScraper_RealE2EPenetration(t *testing.T) {
+	// TODO: Ganti URL ini dengan URL agregator (Idlix) yang valid dan aktif.
+	targetURL := "https://tv12.idlixku.com/movie/peaky-blinders-the-immortal-man-2026/"
 
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/movie/target-movie-url":
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusOK)
-			html := `<!DOCTYPE html>
-			<html>
-			<head><title>Movie Stream</title></head>
-			<body>
-				<div class="player-container">
-					<input type="hidden" id="postid" value="` + expectedPostID + `">
-				</div>
-			</body>
-			</html>`
-			w.Write([]byte(html))
+	// 1. Dependency Injection: Injeksi AntiBot uTLS (Task 6)
+	antiBotClient := client.NewAntiBotClient()
 
-		case "/wp-admin/admin-ajax.php":
-			if r.Method != http.MethodPost {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			r.ParseForm()
-			if r.FormValue("post_id") != expectedPostID || r.FormValue("action") != "get_video_source" {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
+	// Kombinasi Cookie + Nonce adalah kunci mutlak menembus Honeypot WAF mereka!
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("Gagal membuat cookie jar: %v", err)
+	}
+	antiBotClient.Jar = jar
+	// =========================================================================
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			jsonResp := map[string]string{"data": expectedCiphertext}
-			json.NewEncoder(w).Encode(jsonResp)
+	// Memasukkan client yang sudah memiliki "ingatan cookie" ke dalam scraper
+	domScraper := scraper.NewGoQueryScraper(antiBotClient)
 
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer mockServer.Close()
-
-	injectedClient := &http.Client{Timeout: 5 * time.Second}
-	domScraper := scraper.NewGoQueryScraper(injectedClient)
-	targetURL := mockServer.URL + "/movie/target-movie-url"
-
+	// 2. Eksekusi Ekstraksi E2E
+	t.Logf("Memulai penetrasi E2E ke: %s", targetURL)
 	res := domScraper.ScraperMetadata(targetURL)
 
 	if res.IsErr() {
-		err, _ := res.Unwrap()
-		t.Fatalf("Expected successful extraction, got error: %v", err)
+		_, err := res.Unwrap()
+		t.Fatalf("Penetrasi/Ekstraksi Gagal (WAF Block/Network Error): %v", err)
 	}
 
 	metadata, err := res.Unwrap()
@@ -70,11 +42,15 @@ func TestGoQueryScraper_Integration(t *testing.T) {
 		t.Fatalf("Unexpected error unwrapping result: %v", err)
 	}
 
-	if metadata.ID() != expectedPostID {
-		t.Errorf("Expected Post ID %s, got %s", expectedPostID, metadata.ID())
+	// 3. Asersi Fisik: Memastikan artefak benar-benar dikembalikan dari server asli
+	if metadata.ID() == "" {
+		t.Error("E2E Failed: Post ID kosong. Kemungkinan struktur DOM target berubah (Selektor CSS usang).")
 	}
 
-	if metadata.EncryptedEmbedURL() != expectedCiphertext {
-		t.Errorf("Expected Ciphertext %s, got %s", expectedCiphertext, metadata.EncryptedEmbedURL())
+	if metadata.EncryptedEmbedURL() == "" {
+		t.Error("E2E Failed: Ciphertext kosong. Kemungkinan AJAX Endpoint berubah atau payload diblokir.")
 	}
+
+	// Logging sukses untuk memvalidasi panjang ciphertext yang ditangkap
+	t.Logf("E2E Berhasil! ID Target: %s | Panjang Ciphertext: %d bytes", metadata.ID(), len(metadata.EncryptedEmbedURL()))
 }
