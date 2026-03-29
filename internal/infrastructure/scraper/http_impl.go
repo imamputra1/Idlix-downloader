@@ -1,42 +1,82 @@
 package scraper
 
 import (
+	"bytes"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
-	http "github.com/bogdanfinn/fhttp" // WAJIB: Mengganti net/http bawaan Go
-	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/imamputra1/idlix-downloader/internal/core/entities"
 	"github.com/imamputra1/idlix-downloader/internal/core/ports"
 	"github.com/imamputra1/idlix-downloader/pkg/result"
 )
 
-type NativeHTTPScraper struct {
-	client tls_client.HttpClient
+// =====================================================================
+// 1. NETWORK SNIFFER MIDDLEWARE (Kamera CCTV Jaringan)
+// =====================================================================
+type NetworkSniffer struct {
+	Proxied http.RoundTripper
 }
 
-// NewNativeHTTPScraper menginisiasi HTTP Client tahan banting dengan TLS Client
-func NewNativeHTTPScraper() ports.Scraper {
-	jar := tls_client.NewCookieJar()
-	options := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(30),
-		tls_client.WithClientProfile(profiles.Chrome_120),
-		tls_client.WithCookieJar(jar), // Menyimpan session clearance otomatis
-		// tls_client.WithNotFollowRedirects(),
+func (ns *NetworkSniffer) RoundTrip(req *http.Request) (*http.Response, error) {
+	fmt.Printf("\n[SNIFFER] 📡 MENGIRIM: %s %s\n", req.Method, req.URL.String())
+
+	start := time.Now()
+	resp, err := ns.Proxied.RoundTrip(req)
+	duration := time.Since(start)
+
+	if err != nil {
+		fmt.Printf("[SNIFFER] ❌ GAGAL (%s): %v\n", duration, err)
+		return resp, err
 	}
 
-	// Inisialisasi klien yang sidik jarinya identik dengan Chrome
-	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
-	if err != nil {
-		fmt.Printf("Gagal inisialisasi TLS Client: %v\n", err)
+	fmt.Printf("[SNIFFER] ✅ DITERIMA: %s (Status: %d, Waktu: %s)\n", req.URL.Host, resp.StatusCode, duration)
+
+	// Jika ini adalah request AJAX, tangkap dan cetak isi balasan servernya!
+	if strings.Contains(req.URL.Path, "/wp-admin/admin-ajax.php") {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		fmt.Printf("[SNIFFER] 📦 PAYLOAD AJAX DITEMUKAN (Panjang: %d bytes):\n%s\n", len(bodyBytes), string(bodyBytes))
+		// Kembalikan body agar bisa dibaca lagi oleh fungsi utama
+		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	}
+
+	return resp, nil
+}
+
+// =====================================================================
+// 2. SCRAPER UTAMA
+// =====================================================================
+type NativeHTTPScraper struct {
+	client *http.Client
+}
+
+func NewNativeHTTPScraper() ports.Scraper {
+	jar, _ := cookiejar.New(nil)
+
+	// Transport asli (Tanpa HTTP/2)
+	baseTransport := &http.Transport{
+		ForceAttemptHTTP2: false,
+		TLSNextProto:      make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+	}
+
+	// MEMASANG CCTV: Kita bungkus transport asli dengan Sniffer kita
+	snifferTransport := &NetworkSniffer{
+		Proxied: baseTransport,
 	}
 
 	return &NativeHTTPScraper{
-		client: client,
+		client: &http.Client{
+			Transport: snifferTransport, // Gunakan transport yang sudah ada CCTV-nya
+			Jar:       jar,
+		},
 	}
 }
 
@@ -50,8 +90,7 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept", "*/*")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -66,7 +105,7 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 	htmlBytes, _ := io.ReadAll(resp.Body)
 	htmlContent := string(htmlBytes)
 
-	// Ekstraksi ID
+	// Ekstraksi Post ID
 	postIDRegex := regexp.MustCompile(`p=(\d+)"|data-postid="(\d+)"|postid-(\d+)`)
 	postIDMatch := postIDRegex.FindStringSubmatch(htmlContent)
 	var postID string
@@ -75,9 +114,6 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 			postID = match
 			break
 		}
-	}
-	if postID == "" {
-		return result.Err[entities.VideoMetadata](fmt.Errorf("Post ID tidak ditemukan"))
 	}
 
 	// Ekstraksi Nonce
@@ -91,24 +127,26 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 		}
 	}
 
-	fmt.Printf("[TLS-SCRAPER] Fase 1 Sukses! PostID: %s | Nonce: %s\n", postID, nonce)
+	if postID == "" {
+		return result.Err[entities.VideoMetadata](fmt.Errorf("Post ID tidak ditemukan"))
+	}
+
+	fmt.Printf("[HTTP-SCRAPER] Fase 1 Sukses! PostID: %s | Nonce: %s\n", postID, nonce)
 
 	// ==========================================================
-	// FASE 2: POST AJAX
+	// FASE 2: POST AJAX (Eksekusi Kilat tanpa Delay)
 	// ==========================================================
 	parsedURL, _ := url.Parse(targetURL)
 	ajaxURL := fmt.Sprintf("%s://%s/wp-admin/admin-ajax.php", parsedURL.Scheme, parsedURL.Host)
 
-	formData := url.Values{}
-	formData.Set("action", "doo_player_ajax")
-	formData.Set("post", postID)
-	formData.Set("nume", "1")
-	formData.Set("type", "movie")
+	var rawPayload string
 	if nonce != "" {
-		formData.Set("nonce", nonce)
+		rawPayload = fmt.Sprintf("action=doo_player_ajax&post=%s&nume=1&type=movie&nonce=%s", postID, nonce)
+	} else {
+		rawPayload = fmt.Sprintf("action=doo_player_ajax&post=%s&nume=1&type=movie", postID)
 	}
 
-	postReq, err := http.NewRequest(http.MethodPost, ajaxURL, strings.NewReader(formData.Encode()))
+	postReq, err := http.NewRequest(http.MethodPost, ajaxURL, strings.NewReader(rawPayload))
 	if err != nil {
 		return result.Err[entities.VideoMetadata](fmt.Errorf("gagal membuat POST: %w", err))
 	}
@@ -116,10 +154,8 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 	postReq.Header.Set("X-Requested-With", "XMLHttpRequest")
 	postReq.Header.Set("Referer", targetURL)
-	postReq.Header.Set("Origin", fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host))
-	postReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	postReq.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
-	postReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	postReq.Header.Set("User-Agent", req.Header.Get("User-Agent"))
+	postReq.Header.Set("Accept", "*/*")
 
 	postResp, err := s.client.Do(postReq)
 	if err != nil {
@@ -130,50 +166,45 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 	ajaxBytes, _ := io.ReadAll(postResp.Body)
 	rawResponse := string(ajaxBytes)
 
-	if postResp.StatusCode != 200 {
-		return result.Err[entities.VideoMetadata](fmt.Errorf("server error %d: %s", postResp.StatusCode, rawResponse))
-	}
-
-	// Pengecekan Honeypot (0 bytes)
-	if len(strings.TrimSpace(rawResponse)) == 0 {
-		return result.Err[entities.VideoMetadata](fmt.Errorf("silent Drop (Body Kosong)"))
+	if postResp.StatusCode != 200 || len(strings.TrimSpace(rawResponse)) == 0 {
+		return result.Err[entities.VideoMetadata](fmt.Errorf("Silent Drop / HTTP %d", postResp.StatusCode))
 	}
 
 	// ==========================================================
-	// FASE 3: Parsing Custom
+	// FASE 3: Parsing & Unquote
 	// ==========================================================
-	// Karena kita menggunakan fhttp, pastikan untuk menggunakan modul encoding standar
-	// menggunakan trik manual jika json.Unmarshal gagal karena format non-standar
-
-	// Gunakan regex presisi tinggi untuk merobek JSON
-	embedRegex := regexp.MustCompile(`"embed_url"\s*:\s*"((?:\\.|[^"\\])*)"`)
-	keyRegex := regexp.MustCompile(`"key"\s*:\s*"((?:\\.|[^"\\])*)"`)
-
-	embedMatch := embedRegex.FindStringSubmatch(rawResponse)
-	keyMatch := keyRegex.FindStringSubmatch(rawResponse)
-
-	if len(embedMatch) < 2 {
-		return result.Err[entities.VideoMetadata](fmt.Errorf("gagal menemukan embed_url di dalam raw response: %s", rawResponse))
+	var dooPlayResponse struct {
+		EmbedURL string `json:"embed_url"`
+		Key      string `json:"key"`
 	}
 
-	rawEmbedURL := embedMatch[1] // Berisi cipher JSON
-	keyData := ""
-	if len(keyMatch) >= 2 {
-		keyData = keyMatch[1]
+	if err := json.Unmarshal(ajaxBytes, &dooPlayResponse); err != nil {
+		return result.Err[entities.VideoMetadata](fmt.Errorf("gagal memparsing JSON. Raw: %s", rawResponse))
 	}
 
-	// Bersihkan escape character bawaan string jika ada
-	rawEmbedURL = strings.ReplaceAll(rawEmbedURL, `\"`, `"`)
+	cleanKey := dooPlayResponse.Key
+	if strings.Contains(cleanKey, "\\x") {
+		if unquoted, err := strconv.Unquote(`"` + cleanKey + `"`); err == nil {
+			cleanKey = unquoted
+		}
+	}
 
-	fmt.Printf("[TLS-SCRAPER] Ekstraksi Sukses!\n")
+	fmt.Printf("[HTTP-SCRAPER] Ekstraksi Sukses! Panjang CT: %d | Key Bersih: %s\n", len(dooPlayResponse.EmbedURL), cleanKey[:min(10, len(cleanKey))]+"...")
 
 	metadata := entities.NewVideoMetadata(
 		postID,
 		"Extracted Title",
-		rawEmbedURL,
-		keyData,
+		dooPlayResponse.EmbedURL,
+		cleanKey,
 		"",
 	)
 
 	return result.Ok(metadata)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -28,6 +29,31 @@ type embedData struct {
 	M  string `json:"m"`
 }
 
+func padBase64(s string) string {
+	if pad := len(s) % 4; pad != 0 {
+		s += strings.Repeat("=", 4-pad)
+	}
+	return s
+}
+
+func reverseString(s string) string {
+	runes := []rune(s)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+	return string(runes)
+}
+
+func sanitizeBase64(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'A' && r <= 'Z' || (r >= 'a' && r <= 'z') || r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func (a AESDecrypter) DecryptURL(embedURLJSON string, outerKey string) result.Result[string] {
 	var data embedData
 	if err := json.Unmarshal([]byte(embedURLJSON), &data); err != nil {
@@ -36,7 +62,7 @@ func (a AESDecrypter) DecryptURL(embedURLJSON string, outerKey string) result.Re
 
 	passphrase, err := generatePassphrase(outerKey, data.M)
 	if err != nil {
-		return result.Err[string](errors.New("failed to sanitize key/generate passphrase: " + err.Error()))
+		return result.Err[string](errors.New("failed to generate passphrase: " + err.Error()))
 	}
 
 	salt, err := hex.DecodeString(data.S)
@@ -44,72 +70,66 @@ func (a AESDecrypter) DecryptURL(embedURLJSON string, outerKey string) result.Re
 		return result.Err[string](errors.New("failed to decode salt hex: " + err.Error()))
 	}
 
-	// 1. KDF hanya digunakan untuk menghasilkan Key 32-byte
-	aesKey := evpKDF(passphrase, salt)
+	cleanCt := sanitizeBase64(padBase64(data.Ct))
 
-	// 2. KEMBALI MENGGUNAKAN IV DARI JSON (Skenario 4 akan lulus)
+	ciphertext, err := base64.StdEncoding.DecodeString(padBase64(cleanCt))
+	if err != nil {
+		return result.Err[string](errors.New("failed to decode ciphertext base64: " + err.Error()))
+	}
+
+	key := evpKDF(passphrase, salt)
+
 	iv, err := hex.DecodeString(data.Iv)
 	if err != nil {
-		return result.Err[string](errors.New("failed to decode IV hex: " + err.Error()))
+		return result.Err[string](errors.New("failed to decode iv hex: " + err.Error()))
 	}
 
-	ctBytes, err := base64.StdEncoding.DecodeString(data.Ct)
-	if err != nil {
-		return result.Err[string](errors.New("failed to decode ct base64: " + err.Error()))
-	}
-
-	block, err := aes.NewCipher(aesKey)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return result.Err[string](errors.New("failed to create AES cipher: " + err.Error()))
 	}
 
-	if len(ctBytes)%aes.BlockSize != 0 {
-		return result.Err[string](errors.New("ciphertext is not a multiple of block size"))
-	}
-
-	// Gunakan IV murni dari JSON untuk dekripsi
 	mode := cipher.NewCBCDecrypter(block, iv)
-	mode.CryptBlocks(ctBytes, ctBytes)
+	plaintext := make([]byte, len(ciphertext))
+	mode.CryptBlocks(plaintext, ciphertext)
 
-	unpadded, err := unpadPKCS7(ctBytes)
+	unpaddedPlaintext, err := pkcs7Unpad(plaintext)
 	if err != nil {
-		return result.Err[string](errors.New("PKCS7 unpad failed: " + err.Error()))
+		return result.Err[string](errors.New("PKCS7 unpad failed (garbage block): " + err.Error()))
 	}
 
-	var finalURL string
-	if err := json.Unmarshal(unpadded, &finalURL); err != nil {
-		finalURL = string(unpadded)
-	}
+	finalURL := string(unpaddedPlaintext)
+	finalURL = strings.ReplaceAll(finalURL, "\\", "")
+	finalURL = strings.Trim(finalURL, "\"")
 
 	return result.Ok(finalURL)
 }
 
-func generatePassphrase(r, e string) ([]byte, error) {
+func generatePassphrase(outerKey string, m string) ([]byte, error) {
 	var rList []string
 
-	for i := 2; i < len(r); i += 4 {
-		end := i + 2
-		if end > len(r) {
-			end = len(r)
+	if strings.Contains(outerKey, "\\x") {
+		for i := 2; i < len(outerKey); i += 4 {
+			if i+2 <= len(outerKey) {
+				rList = append(rList, outerKey[i:i+2])
+			}
 		}
-		rList = append(rList, r[i:end])
+	} else {
+		for _, r := range outerKey {
+			rList = append(rList, fmt.Sprintf("%02x", r))
+		}
 	}
+	reversedM := reverseString(m)
+	paddedM := padBase64(reversedM)
+	cleanM := sanitizeBase64(paddedM)
 
-	runes := []rune(e)
-	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-		runes[i], runes[j] = runes[j], runes[i]
-	}
-	eRev := string(runes)
-
-	pad := (4 - (len(eRev) % 4)) % 4
-	eRev += strings.Repeat("=", pad)
-
-	decodedMBytes, err := base64.StdEncoding.DecodeString(eRev)
+	decodedMBytes, err := base64.StdEncoding.DecodeString(cleanM)
 	if err != nil {
-		return nil, errors.New("base64 decode error on m: " + err.Error())
+		return nil, errors.New("failed to decode base64 M: " + err.Error())
 	}
 
 	mList := strings.Split(string(decodedMBytes), "|")
+
 	var passphraseBuilder strings.Builder
 
 	for _, s := range mList {
@@ -129,16 +149,13 @@ func generatePassphrase(r, e string) ([]byte, error) {
 		}
 
 		idx, err := strconv.Atoi(s)
+
 		if err == nil && idx >= 0 && idx < len(rList) {
-			val, err := strconv.ParseInt(rList[idx], 16, 32)
-			if err != nil {
-				return nil, errors.New("hex parse error: " + err.Error())
-			}
-			passphraseBuilder.WriteRune(rune(val))
+			passphraseBuilder.WriteString("\\x")
+			passphraseBuilder.WriteString(rList[idx])
 		}
 	}
 
-	// BLOK BASE64 DECODE TELAH DIHAPUS. KITA MENGGUNAKAN RAW STRING SEPERTI PYTHON!
 	return []byte(passphraseBuilder.String()), nil
 }
 
@@ -146,7 +163,6 @@ func evpKDF(passphrase, salt []byte) []byte {
 	var key []byte
 	var block []byte
 
-	// Mengumpulkan hash hanya untuk 32 byte Key
 	for len(key) < 32 {
 		hasher := md5.New()
 		hasher.Write(block)
@@ -159,18 +175,18 @@ func evpKDF(passphrase, salt []byte) []byte {
 	return key[:32]
 }
 
-func unpadPKCS7(data []byte) ([]byte, error) {
+func pkcs7Unpad(data []byte) ([]byte, error) {
 	length := len(data)
 	if length == 0 {
-		return nil, errors.New("data is empty")
+		return nil, errors.New("empty data")
 	}
 
 	paddingLen := int(data[length-1])
-	if paddingLen == 0 || paddingLen > length || paddingLen > aes.BlockSize {
+	if paddingLen < 1 || paddingLen > aes.BlockSize || paddingLen > length {
 		return nil, errors.New("invalid padding length (garbage block)")
 	}
 
-	for i := range paddingLen {
+	for i := 0; i < paddingLen; i++ {
 		if data[length-1-i] != byte(paddingLen) {
 			return nil, errors.New("invalid padding bytes")
 		}
