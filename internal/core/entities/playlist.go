@@ -1,6 +1,5 @@
 package entities
 
-// MediaSegment represents a single immutable .ts chunk.
 type MediaSegment struct {
 	url      string
 	sequence int
@@ -19,7 +18,6 @@ func (m MediaSegment) URL() string       { return m.url }
 func (m MediaSegment) Sequence() int     { return m.sequence }
 func (m MediaSegment) Duration() float64 { return m.duration }
 
-// HLSPlaylist represents an immutable HLS playlist structure.
 type HLSPlaylist struct {
 	resolution     string
 	targetDuration float64

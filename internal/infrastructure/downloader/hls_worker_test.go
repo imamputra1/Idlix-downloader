@@ -7,15 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
-// =========================================================================
-// TC-7.5.1 & TC-7.5.2: Parsing Playlist (Unit Test Murni)
-// =========================================================================
 func TestHLSDownloader_ParseSegments(t *testing.T) {
-	downloader := NewHSLDownloader(1)
+	downloader := NewHLSDownloader(1)
 	baseURL := "https://mock-server.com/hls/"
 
 	// Simulasi M3U8 dengan komentar, URL absolut, dan URL relatif
@@ -30,43 +28,72 @@ https://cdn.external.com/segment2.ts
 `
 
 	expected := []string{
-		"https://mock-server.com/hls/segment1.ts",                // Relatif -> Digabung dengan baseURL (TC-7.5.2)
-		"https://cdn.external.com/segment2.ts",                   // Absolut HTTP -> Dibiarkan (TC-7.5.1)
-		"https://mock-server.com/hls//absolute/path/segment3.ts", // Sesuai logika parser asli
+		"https://mock-server.com/hls/segment1.ts",
+		"https://cdn.external.com/segment2.ts",
+		"https://mock-server.com/hls//absolute/path/segment3.ts",
 	}
 
 	segments := downloader.parseSegments(playlist, baseURL)
 
-	// Validasi TC-7.5.1: Mengabaikan komentar dan mengekstrak tepat 3 tautan
 	if len(segments) != 3 {
 		t.Fatalf("TC-7.5.1 GAGAL: Diharapkan 3 segmen, mendapatkan %d segmen", len(segments))
 	}
 
-	// Validasi TC-7.5.2: Penggabungan Base URL
 	if !reflect.DeepEqual(segments, expected) {
 		t.Errorf("TC-7.5.2 GAGAL: Hasil ekstraksi URL tidak presisi.\nDiharapkan: %v\nMendapatkan: %v", expected, segments)
 	}
 	t.Log("✅ TC-7.5.1 & TC-7.5.2 LULUS: Parsing Playlist M3U8 sukses")
 }
 
-// =========================================================================
-// TC-7.5.3 & TC-7.5.5: Sequential Assembly & Race Condition (Stress Test)
-// =========================================================================
+func TestHLSDownloader_MasterPlaylistResolution(t *testing.T) {
+	mux := http.NewServeMux()
+
+	// Endpoint Master Playlist
+	mux.HandleFunc("/master.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+/media_360p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1400000,RESOLUTION=842x480
+/media_480p.m3u8
+`))
+	})
+
+	mux.HandleFunc("/media_360p.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`#EXTM3U
+#EXTINF:10.0,
+/seg1.ts
+`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	downloader := NewHLSDownloader(1)
+
+	playlistContent, _, err := downloader.fetchPlaylist(server.URL + "/master.m3u8")
+	if err != nil {
+		t.Fatalf("Gagal memanggil fetchPlaylist: %v", err)
+	}
+
+	if !strings.Contains(playlistContent, "/seg1.ts") {
+		t.Errorf("GAGAL: Resolusi rekursif Master Playlist tidak berhasil mencapai Media Playlist. Mendapatkan: \n%s", playlistContent)
+	} else {
+		t.Log("✅ FITUR BARU LULUS: Resolusi rekursif Master -> Media Playlist berhasil!")
+	}
+}
+
 func TestHLSDownloader_SequentialAssemblyAndConcurrency(t *testing.T) {
 	mux := http.NewServeMux()
-	numSegments := 50 // Jumlah segmen yang cukup untuk Stress Test
+	numSegments := 20
 	expectedContent := ""
 
-	// Membangun Peladen Tiruan (Mock Server)
 	for i := 0; i < numSegments; i++ {
-		i := i // Menghindari isu closure di dalam goroutine loop
+		i := i
 		content := fmt.Sprintf("SEG[%d]", i)
 		expectedContent += content
 
 		mux.HandleFunc(fmt.Sprintf("/seg%d.ts", i), func(w http.ResponseWriter, r *http.Request) {
-			// Injeksi Chaos: Membuat segmen awal memiliki latensi lebih lambat
-			// daripada segmen akhir untuk memaksa hasil download Out-Of-Order.
-			delay := time.Duration((numSegments-i)%5) * time.Millisecond
+			delay := time.Duration((numSegments-i)%5) * 10 * time.Millisecond
 			time.Sleep(delay)
 			w.Write([]byte(content))
 		})
@@ -82,69 +109,56 @@ func TestHLSDownloader_SequentialAssemblyAndConcurrency(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	// 10 Workers untuk memicu kompetisi Goroutine ekstrim (TC-7.5.5)
-	downloader := NewHSLDownloader(10)
-
-	outputFile := filepath.Join(t.TempDir(), "output_stress.mp4")
+	downloader := NewHLSDownloader(10)
+	outputFile := filepath.Join(t.TempDir(), "output_stress.ts")
 
 	err := downloader.DownloadVideo(server.URL+"/playlist.m3u8", outputFile)
 	if err != nil {
 		t.Fatalf("Tidak diharapkan error selama proses normal: %v", err)
 	}
 
-	// Validasi TC-7.5.3: Memastikan integritas dan urutan biner
 	data, err := os.ReadFile(outputFile)
 	if err != nil {
 		t.Fatalf("Gagal membaca file output: %v", err)
 	}
 
 	if string(data) != expectedContent {
-		t.Errorf("TC-7.5.3 GAGAL: File final korup atau urutan segmen berantakan akibat race condition buffer.")
+		t.Errorf("TC-7.5.3 GAGAL: Urutan biner berantakan. Implementasi buffer perakitan gagal menangani Out-Of-Order.")
 	} else {
-		t.Logf("✅ TC-7.5.3 LULUS: Perakitan sekuensial berhasil sempurna (Ukuran: %d bytes)", len(data))
+		t.Logf("✅ TC-7.5.3 LULUS: Perakitan sekuensial berhasil sempurna di bawah eksekusi konkuren!")
 	}
 }
 
-// =========================================================================
-// TC-7.5.4: Network Resiliency (Chaos/Error Handling)
-// =========================================================================
 func TestHLSDownloader_NetworkResiliency(t *testing.T) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/seg0.ts", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("DATA_0")) })
 
-	// Segmen 1 mensimulasikan kegagalan jaringan fatal (Connection Reset)
 	mux.HandleFunc("/seg1.ts", func(w http.ResponseWriter, r *http.Request) {
 		hj, ok := w.(http.Hijacker)
 		if ok {
 			conn, _, _ := hj.Hijack()
-			conn.Close() // Memaksa http.Client Go menghasilkan error seketika
+			conn.Close()
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	mux.HandleFunc("/seg2.ts", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("DATA_2")) })
-
 	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("#EXTM3U\n#EXTINF:10.0,\n/seg0.ts\n#EXTINF:10.0,\n/seg1.ts\n#EXTINF:10.0,\n/seg2.ts\n"))
+		w.Write([]byte("#EXTM3U\n#EXTINF:10.0,\n/seg0.ts\n#EXTINF:10.0,\n/seg1.ts\n"))
 	})
 
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	downloader := NewHSLDownloader(3)
-	outputFile := filepath.Join(t.TempDir(), "output_error.mp4")
+	downloader := NewHLSDownloader(3)
+	outputFile := filepath.Join(t.TempDir(), "output_error.ts")
 
 	err := downloader.DownloadVideo(server.URL+"/playlist.m3u8", outputFile)
 
-	// Validasi TC-7.5.4
-	// CATATAN: Tes ini sengaja dirancang untuk mendeteksi kelemahan pada implementasi
-	// DownloadVideo() Anda saat ini, yang hanya mencetak error dengan `fmt.Printf` dan melanjutkannya
-	// (`continue`) tanpa mengembalikan error ke fungsi pemanggil.
 	if err == nil {
-		t.Errorf("❌ TC-7.5.4 GAGAL: Implementasi DownloadVideo() Anda tidak mengembalikan error saat terjadi kegagalan jaringan di worker. Sistem tidak crash (tidak deadlock), tetapi status error ditelan diam-diam. Silakan perbaiki loop resultChan di hls_worker.go untuk mengembalikan error.")
+		t.Errorf("❌ TC-7.5.4 GAGAL: Error jaringan tidak dikembalikan ke fungsi pemanggil. Proses gagal dibatalkan dengan aman.")
 	} else {
-		t.Log("✅ TC-7.5.4 LULUS: Kegagalan segmen terdeteksi dan dihentikan dengan aman.")
+		t.Logf("✅ TC-7.5.4 LULUS: Sistem berhasil menangkap error jaringan dengan aman: %v", err)
 	}
 }

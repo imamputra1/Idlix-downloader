@@ -45,9 +45,7 @@ func TestAESDecrypter_DecryptURL(t *testing.T) {
 			wantErr:     true,
 			errContains: "failed to decode IV hex",
 		},
-		// =====================================================================
-		// SCENARIO 5 - HAPPY PATH (Real Data Aggregator - Cookie+Nonce Auth)
-		// =====================================================================
+
 		{
 			name:        "Scenario 5: Happy Path (Real Data Aggregator)",
 			payloadJSON: `{"ct":"BFArUsXSnuwqR9T\/UBHR2Zlw3FwLUXi1n+qv2BXkeKsySzqYd\/2KGPSHLIz86Xq8tuZtHV8\/9Vf8hb8fdCePbNFu0mczdtIxZ7iZTGUFSJs=","iv":"b0bb3661bd5d7f5cc6d0d6344177cd78","s":"921d2c358aea887d","m":"ANzwnM8BjM8hzM8djM8FzM8VjM8hTM8hjM8dDf5MDfyQDf0EDfxwHMxwXNzwXO8ZTM8hDfwQDf3EDfwMDfzIDf2w3M8JzM8RjM8lTM8ZjM8VTM8NDN8RDfxEDf2MDf5IDf1wnMxwHM8JjM8NzM8NTM8FDN8FjM8dzM"}`,
@@ -66,7 +64,7 @@ func TestAESDecrypter_DecryptURL(t *testing.T) {
 					t.Fatalf("Expected an error but got success with URL: %s", val)
 				}
 
-				_, err := res.Unwrap() // Perbaikan: error ada di return value kedua
+				_, err := res.Unwrap()
 				if err != nil && !strings.Contains(err.Error(), tt.errContains) {
 					t.Errorf("Expected error to contain '%s', but got: '%v'", tt.errContains, err.Error())
 				}
@@ -76,7 +74,7 @@ func TestAESDecrypter_DecryptURL(t *testing.T) {
 					t.Fatalf("Expected success but got error: %v", err)
 				}
 
-				url, _ := res.Unwrap() // Perbaikan: Ambil nilai value, buang error
+				url, _ := res.Unwrap()
 				if url == "" {
 					t.Errorf("Expected valid URL, got empty string")
 				} else {

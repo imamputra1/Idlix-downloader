@@ -8,57 +8,130 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
+
+type VideoResolution struct {
+	Bandwidth   int    `json:"bandwidth"`
+	Resolution  string `json:"resolution"`
+	PlaylistURL string `json:"playlist_url"`
+}
 
 type HLSDownloader struct {
 	client     *http.Client
 	workerPool int
 }
 
-func NewHSLDownloader(workers int) *HLSDownloader {
+func NewHLSDownloader(workers int) *HLSDownloader {
 	return &HLSDownloader{
-		client:     &http.Client{},
+		client:     &http.Client{Timeout: 180 * time.Second},
 		workerPool: workers,
 	}
 }
 
-func (h *HLSDownloader) DownloadVideo(m3u8URL string, outputFilename string) error {
-	fmt.Printf("[DOWNLOAD] Membaca M3U8 Playlist... ")
+func (h *HLSDownloader) ExtractResolutions(masterM3U8 string) ([]VideoResolution, error) {
+	req, _ := http.NewRequest("GET", masterM3U8, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
+	req.Header.Set("Referer", "https://jeniusplay.com/")
 
-	playlist, baseURL, err := h.fetchPlaylist(m3u8URL)
-	if err != nil {
-		return err
+	resp, err := h.client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		return nil, fmt.Errorf("akses master playlist ditolak oleh server")
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	scanner := bufio.NewScanner(strings.NewReader(string(bodyBytes)))
+
+	var resolutions []VideoResolution
+	baseURL, _ := url.Parse(masterM3U8)
+
+	bandwidthRegex := regexp.MustCompile(`BANDWIDTH=(\d+)`)
+	resolutionRegex := regexp.MustCompile(`RESOLUTION=(\d+x\d+)`)
+
+	var currentBandwidth int
+	var currentResString string
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "#EXT-X-STREAM-INF") {
+			if bwMatch := bandwidthRegex.FindStringSubmatch(line); len(bwMatch) > 1 {
+				currentBandwidth, _ = strconv.Atoi(bwMatch[1])
+			}
+			if resMatch := resolutionRegex.FindStringSubmatch(line); len(resMatch) > 1 {
+				currentResString = resMatch[1]
+			}
+			continue
+		}
+
+		if !strings.HasPrefix(line, "#") && currentBandwidth > 0 {
+			refURL, _ := url.Parse(line)
+			resolvedURL := baseURL.ResolveReference(refURL).String()
+
+			resolutions = append(resolutions, VideoResolution{
+				Bandwidth:   currentBandwidth,
+				Resolution:  currentResString,
+				PlaylistURL: resolvedURL,
+			})
+
+			currentBandwidth = 0
+			currentResString = ""
+		}
 	}
 
-	segments := h.parseSegments(playlist, baseURL)
+	if len(resolutions) == 0 {
+		return nil, fmt.Errorf("tidak ada resolusi yang ditemukan, pastikan URL valid")
+	}
+	return resolutions, nil
+}
+
+func (h *HLSDownloader) ExecuteDownload(MediaPlaylistURL string, outputFilename string) error {
+	fmt.Print("[DOWNLOAD] Menganalisis M3U8 Playlist...\n")
+
+	req, _ := http.NewRequest("GET", MediaPlaylistURL, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
+	req.Header.Set("Referer", "https://jeniusplay.com/")
+
+	resp, err := h.client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		return fmt.Errorf("gagal mengakses sub-playlist target")
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	segments := h.parseSegments(string(bodyBytes), MediaPlaylistURL)
+
 	if len(segments) == 0 {
-		return fmt.Errorf("tidak ada segmen video yang ditemukan di dalam playlist")
+		return fmt.Errorf("tidak ada segmen video yang ditemukan di dalam sub-playlist")
 	}
-	fmt.Printf("[DOWNLOAD] Ditemukan %d segmen video. Memulai pengunduhan paralel .. \n", len(segments))
 
-	outputFile, err := os.Create(outputFilename)
-	if err != nil {
-		return fmt.Errorf("gagal membuat file output: %w", err)
-	}
-	defer outputFile.Close()
+	tempDir := filepath.Join(filepath.Dir(outputFilename), ".tmp_hls_segments")
+	os.MkdirAll(tempDir, 0o755)
+	defer os.RemoveAll(tempDir)
+
+	fmt.Print("[DOWNLOAD] Ditemukan %d segmen video. Memulai pasukan pekerja...\n", len(segments))
 
 	var wg sync.WaitGroup
 	segmentChan := make(chan struct {
 		index int
 		url   string
 	}, len(segments))
-
 	resultChan := make(chan struct {
 		index int
-		data  []byte
 		err   error
 	}, len(segments))
 
 	for i := 0; i < h.workerPool; i++ {
 		wg.Add(1)
-		go h.worker(segmentChan, resultChan, &wg)
+		go h.worker(segmentChan, resultChan, tempDir, &wg)
 	}
 
 	for i, segURL := range segments {
@@ -74,71 +147,52 @@ func (h *HLSDownloader) DownloadVideo(m3u8URL string, outputFilename string) err
 		close(resultChan)
 	}()
 
-	buffer := make(map[int][]byte)
-	expectedIndex := 0
 	downloadedCount := 0
 
 	for res := range resultChan {
 		if res.err != nil {
-			fmt.Printf("\n Pekerja melaporkan kegagalan pada segmen %d: %v\n", res.index, res.err)
-			return fmt.Errorf("pengunduhan gagal pada segment %d: %w", res.index, res.err)
+			fmt.Printf("\n Kegagalan permanen pada segmen %d: %v\n", res.index, res.err)
+			return fmt.Errorf("pengunduhan dibatalkan karena error jaringan yang tidak dapat dipulihkan")
 		}
-
-		buffer[res.index] = res.data
 		downloadedCount++
-		fmt.Printf("\r[DOWNLOAD] progress: %d/%d segmen terunduh ...", downloadedCount, len(segments))
-
-		for {
-			if data, exists := buffer[expectedIndex]; exists {
-				outputFile.Write(data)
-				delete(buffer, expectedIndex)
-				expectedIndex++
-			} else {
-				break
-			}
-		}
+		fmt.Printf("\r[DOWNLOAD] Progress: %d/%d segmen terunduh ke Disk...", downloadedCount, len(segments))
 	}
-	fmt.Printf("\n[DOWNLOAD] PENGUNDUHAN SELESAI! Video tersimpan sebagai: %s\n", outputFilename)
 
+	fmt.Print("\n[DOWNLOAD] Menggabungkan segmen menjadi file Video final...\n")
+	outputFile, err := os.Create(outputFilename)
+	if err != nil {
+		return fmt.Errorf("gagal membuat file final: %w", err)
+	}
+	defer outputFile.Close()
+
+	for i := 0; i < len(segments); i++ {
+		tempFilePath := filepath.Join(tempDir, fmt.Sprintf("seg_%05d.ts", i))
+		tempData, err := os.ReadFile(tempFilePath)
+		if err != nil {
+			return fmt.Errorf("gagal membaca segment %d: %w", i, err)
+		}
+		outputFile.Write(tempData)
+	}
 	return nil
 }
 
-func (h *HLSDownloader) fetchPlaylist(playlistURL string) (string, string, error) {
-	req, err := http.NewRequest("GET", playlistURL, nil)
-	if err != nil {
-		return "", "", err
-	}
-
-	req.Header.Set("User-Agent", "Mozila/5.0 (Windows NT 10.0; Win64, x64) AppleWebKit/537.36")
-
-	resp, err := h.client.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-
-	parsedURL, _ := url.Parse(playlistURL)
-	baseURL := fmt.Sprintf("%s://%s%s/", parsedURL.Scheme, parsedURL.Host, filepath.Dir(parsedURL.Path))
-
-	return string(body), baseURL, err
-}
-
-func (h *HLSDownloader) parseSegments(playlist string, baseURL string) []string {
+func (h *HLSDownloader) parseSegments(playlist string, sourceURL string) []string {
 	var segments []string
 	scanner := bufio.NewScanner(strings.NewReader(playlist))
+	baseURL, _ := url.Parse(sourceURL)
+	expectSegment := false
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if strings.HasPrefix(line, "#EXTINF") {
+			expectSegment = true
 			continue
 		}
-
-		if !strings.HasPrefix(line, "http") {
-			line = baseURL + line
+		if expectSegment && !strings.HasPrefix(line, "#") {
+			refURL, _ := url.Parse(line)
+			segments = append(segments, baseURL.ResolveReference(refURL).String())
+			expectSegment = false
 		}
-		segments = append(segments, line)
 	}
 	return segments
 }
@@ -148,32 +202,61 @@ func (h *HLSDownloader) worker(jobs <-chan struct {
 	url   string
 }, results chan<- struct {
 	index int
-	data  []byte
 	err   error
-}, wg *sync.WaitGroup,
+}, tempDir string, wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
+	maxRetries := 5
 
 	for job := range jobs {
-		req, _ := http.NewRequest("GET", job.url, nil)
-		req.Header.Set("User-Agent", "Mozila /5.0")
+		var finalErr error
+		success := false
 
-		resp, err := h.client.Do(req)
-		if err != nil {
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			req, _ := http.NewRequest("GET", job.url, nil)
+			req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
+			req.Header.Set("Referer", "https://jeniusplay.com/")
+
+			resp, err := h.client.Do(req)
+			if err != nil {
+				finalErr = err
+				time.Sleep(time.Duration(attempt*2) * time.Second)
+				continue
+			}
+
+			if resp.StatusCode != 200 {
+				resp.Body.Close()
+				finalErr = fmt.Errorf("HTTP Status %d", resp.StatusCode)
+				time.Sleep(time.Duration(attempt*2) * time.Second)
+				continue
+			}
+
+			data, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if err == nil {
+				tempFilePath := filepath.Join(tempDir, fmt.Sprintf("seg_%05d.ts", job.index))
+				err = os.WriteFile(tempFilePath, data, 0o644)
+				if err == nil {
+					success = true
+					break
+				}
+			}
+
+			finalErr = err
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+
+		if !success {
 			results <- struct {
 				index int
-				data  []byte
 				err   error
-			}{index: job.index, err: err}
-			continue
+			}{index: job.index, err: fmt.Errorf("gagal setelah %d percobaan. Error terakhir: %v", maxRetries, finalErr)}
+		} else {
+			results <- struct {
+				index int
+				err   error
+			}{index: job.index, err: nil}
 		}
-		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		results <- struct {
-			index int
-			data  []byte
-			err   error
-		}{index: job.index, data: data, err: err}
 	}
 }

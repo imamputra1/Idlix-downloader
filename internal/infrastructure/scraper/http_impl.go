@@ -19,41 +19,33 @@ import (
 	"github.com/imamputra1/idlix-downloader/pkg/result"
 )
 
-// =====================================================================
-// 1. NETWORK SNIFFER MIDDLEWARE (Kamera CCTV Jaringan)
-// =====================================================================
 type NetworkSniffer struct {
 	Proxied http.RoundTripper
 }
 
 func (ns *NetworkSniffer) RoundTrip(req *http.Request) (*http.Response, error) {
-	fmt.Printf("\n[SNIFFER] 📡 MENGIRIM: %s %s\n", req.Method, req.URL.String())
+	fmt.Printf("\n[SNIFFER] MENGIRIM: %s %s\n", req.Method, req.URL.String())
 
 	start := time.Now()
 	resp, err := ns.Proxied.RoundTrip(req)
 	duration := time.Since(start)
 
 	if err != nil {
-		fmt.Printf("[SNIFFER] ❌ GAGAL (%s): %v\n", duration, err)
+		fmt.Printf("[SNIFFER] GAGAL (%s): %v\n", duration, err)
 		return resp, err
 	}
 
-	fmt.Printf("[SNIFFER] ✅ DITERIMA: %s (Status: %d, Waktu: %s)\n", req.URL.Host, resp.StatusCode, duration)
+	fmt.Printf("[SNIFFER] DITERIMA: %s (Status: %d, Waktu: %s)\n", req.URL.Host, resp.StatusCode, duration)
 
-	// Jika ini adalah request AJAX, tangkap dan cetak isi balasan servernya!
 	if strings.Contains(req.URL.Path, "/wp-admin/admin-ajax.php") {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		fmt.Printf("[SNIFFER] 📦 PAYLOAD AJAX DITEMUKAN (Panjang: %d bytes):\n%s\n", len(bodyBytes), string(bodyBytes))
-		// Kembalikan body agar bisa dibaca lagi oleh fungsi utama
+		fmt.Printf("[SNIFFER] PAYLOAD AJAX DITEMUKAN (Panjang: %d bytes):\n%s\n", len(bodyBytes), string(bodyBytes))
 		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	}
 
 	return resp, nil
 }
 
-// =====================================================================
-// 2. SCRAPER UTAMA
-// =====================================================================
 type NativeHTTPScraper struct {
 	client *http.Client
 }
@@ -61,29 +53,24 @@ type NativeHTTPScraper struct {
 func NewNativeHTTPScraper() ports.Scraper {
 	jar, _ := cookiejar.New(nil)
 
-	// Transport asli (Tanpa HTTP/2)
 	baseTransport := &http.Transport{
 		ForceAttemptHTTP2: false,
 		TLSNextProto:      make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 	}
 
-	// MEMASANG CCTV: Kita bungkus transport asli dengan Sniffer kita
 	snifferTransport := &NetworkSniffer{
 		Proxied: baseTransport,
 	}
 
 	return &NativeHTTPScraper{
 		client: &http.Client{
-			Transport: snifferTransport, // Gunakan transport yang sudah ada CCTV-nya
+			Transport: snifferTransport,
 			Jar:       jar,
 		},
 	}
 }
 
 func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[entities.VideoMetadata] {
-	// ==========================================================
-	// FASE 1: GET Halaman Utama
-	// ==========================================================
 	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
 	if err != nil {
 		return result.Err[entities.VideoMetadata](fmt.Errorf("gagal membuat request: %w", err))
@@ -105,7 +92,6 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 	htmlBytes, _ := io.ReadAll(resp.Body)
 	htmlContent := string(htmlBytes)
 
-	// Ekstraksi Post ID
 	postIDRegex := regexp.MustCompile(`p=(\d+)"|data-postid="(\d+)"|postid-(\d+)`)
 	postIDMatch := postIDRegex.FindStringSubmatch(htmlContent)
 	var postID string
@@ -116,7 +102,6 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 		}
 	}
 
-	// Ekstraksi Nonce
 	nonceRegex := regexp.MustCompile(`"nonce":"([^"]+)"|data-nonce="([^"]+)"`)
 	nonceMatch := nonceRegex.FindStringSubmatch(htmlContent)
 	var nonce string
@@ -133,9 +118,6 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 
 	fmt.Printf("[HTTP-SCRAPER] Fase 1 Sukses! PostID: %s | Nonce: %s\n", postID, nonce)
 
-	// ==========================================================
-	// FASE 2: POST AJAX (Eksekusi Kilat tanpa Delay)
-	// ==========================================================
 	parsedURL, _ := url.Parse(targetURL)
 	ajaxURL := fmt.Sprintf("%s://%s/wp-admin/admin-ajax.php", parsedURL.Scheme, parsedURL.Host)
 
@@ -170,9 +152,6 @@ func (s *NativeHTTPScraper) ScraperMetadata(targetURL string) result.Result[enti
 		return result.Err[entities.VideoMetadata](fmt.Errorf("Silent Drop / HTTP %d", postResp.StatusCode))
 	}
 
-	// ==========================================================
-	// FASE 3: Parsing & Unquote
-	// ==========================================================
 	var dooPlayResponse struct {
 		EmbedURL string `json:"embed_url"`
 		Key      string `json:"key"`

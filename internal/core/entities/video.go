@@ -1,6 +1,5 @@
 package entities
 
-// VideoMetadata represents immutable information about a scraped video.
 type VideoMetadata struct {
 	id                string
 	title             string
@@ -9,7 +8,6 @@ type VideoMetadata struct {
 	cleanSourceURL    string
 }
 
-// NewVideoMetadata creates a new immutable VideoMetadata instance.
 func NewVideoMetadata(id, title, encryptedEmbedURL, decryptionKey, cleanSourceURL string) VideoMetadata {
 	return VideoMetadata{
 		id:                id,
@@ -20,27 +18,22 @@ func NewVideoMetadata(id, title, encryptedEmbedURL, decryptionKey, cleanSourceUR
 	}
 }
 
-// ID returns the video identifier.
 func (v VideoMetadata) ID() string {
 	return v.id
 }
 
-// Title returns the title of the video.
 func (v VideoMetadata) Title() string {
 	return v.title
 }
 
-// EncryptedEmbedURL returns the AES encrypted URL.
 func (v VideoMetadata) EncryptedEmbedURL() string {
 	return v.encryptedEmbedURL
 }
 
-// DecryptionKey mengembalikan kunci dekripsi untuk memecahkan ciphertext.
 func (v VideoMetadata) DecryptionKey() string {
 	return v.decryptionKey
 }
 
-// CleanSourceURL returns the decrypted, clean root server URL.
 func (v VideoMetadata) CleanSourceURL() string {
 	return v.cleanSourceURL
 }
