@@ -16,9 +16,10 @@ import (
 )
 
 type VideoResolution struct {
-	Bandwidth   int    `json:"bandwidth"`
-	Resolution  string `json:"resolution"`
-	PlaylistURL string `json:"playlist_url"`
+	Bandwidth       int     `json:"bandwidth"`
+	Resolution      string  `json:"resolution"`
+	PlaylistURL     string  `json:"playlist_url"`
+	EstimatedSizeMB float64 `json:"estimated_size_mb"`
 }
 
 type HLSDownloader struct {
@@ -31,6 +32,30 @@ func NewHLSDownloader(workers int) *HLSDownloader {
 		client:     &http.Client{Timeout: 180 * time.Second},
 		workerPool: workers,
 	}
+}
+
+func (h *HLSDownloader) estimated_size_mb(MediaPlaylistURL string) float64 {
+	req, _ := http.NewRequest("GET", MediaPlaylistURL, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
+	req.Header.Set("Referer", "https://jeniusplay.com/")
+
+	resp, err := h.client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	extinfRegex := regexp.MustCompile(`#EXTINF:([\d\.]+)`)
+	var totalDuration float64
+
+	for scanner.Scan() {
+		if match := extinfRegex.FindStringSubmatch(scanner.Text()); len(match) > 1 {
+			val, _ := strconv.ParseFloat(match[1], 64)
+			totalDuration += val
+		}
+	}
+	return totalDuration
 }
 
 func (h *HLSDownloader) ExtractResolutions(masterM3U8 string) ([]VideoResolution, error) {
@@ -88,7 +113,14 @@ func (h *HLSDownloader) ExtractResolutions(masterM3U8 string) ([]VideoResolution
 	}
 
 	if len(resolutions) == 0 {
-		return nil, fmt.Errorf("tidak ada resolusi yang ditemukan, pastikan URL valid")
+		return nil, fmt.Errorf("tidak ada resolusi yang ditemukan")
+	}
+
+	totalDurationSec := h.estimated_size_mb(resolutions[0].PlaylistURL)
+	if totalDurationSec > 0 {
+		for i := range resolutions {
+			resolutions[i].EstimatedSizeMB = (float64(resolutions[i].Bandwidth) * totalDurationSec) / 8.0 / 1024.0 / 1024.0
+		}
 	}
 	return resolutions, nil
 }
