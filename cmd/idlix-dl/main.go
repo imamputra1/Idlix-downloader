@@ -169,32 +169,53 @@ func main() {
 }
 
 func extractJeniusPlayM3U8(iframeURL, refererURL string) (string, []SubtitleTrack, error) {
-	parsedURL, err := url.Parse(iframeURL)
-	if err != nil {
-		return "", nil, fmt.Errorf("gagal membedah url iframe: %v", err)
-	}
+	cleanIframeURL := strings.TrimSpace(iframeURL)
+	cleanIframeURL = strings.ReplaceAll(cleanIframeURL, "\n", "")
+	cleanIframeURL = strings.ReplaceAll(cleanIframeURL, "\r", "")
+	cleanIframeURL = strings.ReplaceAll(cleanIframeURL, "\\", "")
+
+	client := &http.Client{Timeout: 15 * time.Second}
 
 	var hash string
+	var htmlStr string
 
-	if parsedURL.Query().Has("data") {
-		hash = parsedURL.Query().Get("Data")
+	reqHtml, _ := http.NewRequest("GET", cleanIframeURL, nil)
+	reqHtml.Header.Set("User-Agent", "Mozilla/5.0 (Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+	reqHtml.Header.Set("Referer", refererURL)
+
+	if respHtml, err := client.Do(reqHtml); err == nil && respHtml.StatusCode == 200 {
+		htmlBytes, _ := io.ReadAll(respHtml.Body)
+		htmlStr = string(htmlBytes)
+		respHtml.Body.Close()
+	}
+
+	if strings.Contains(cleanIframeURL, "data=") {
+		parts := strings.Split(cleanIframeURL, "data=")
+		if len(parts) > 1 {
+			hash = parts[1]
+			if strings.Contains(hash, "&") {
+				hash = strings.Split(hash, "&")[0]
+			}
+		}
 	} else {
-		parts := strings.Split(strings.TrimRight(iframeURL, "/"), "/")
-		hash = parts[len(parts)-1]
+		parsedURL, err := url.Parse(iframeURL)
+		if err == nil {
+			parts := strings.Split(strings.TrimRight(parsedURL.Path, "/"), "/")
+			hash = parts[len(parts)-1]
+		}
 	}
 
 	if hash == "" || hash == "index.php" {
-		return "", nil, fmt.Errorf("Gagal mengekstrak ID hash dari URL iframeURL: %s", iframeURL)
+		return "", nil, fmt.Errorf("Gagal mengekstrak ID hash dari URL iframeURL: %s", cleanIframeURL)
 	}
 
 	jeniusAPI := "https://jeniusplay.com/player/index.php?data=" + hash + "&do=getVideo"
 	payload := "hash=" + hash + "&r=" + refererURL
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	req, _ := http.NewRequest(http.MethodPost, jeniusAPI, strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Referer", iframeURL)
+	req.Header.Set("Referer", cleanIframeURL)
 	req.Header.Set("Origin", "https://jeniusplay.com")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
@@ -242,24 +263,34 @@ func extractJeniusPlayM3U8(iframeURL, refererURL string) (string, []SubtitleTrac
 
 	var subtitles []SubtitleTrack
 
-	blockRegex := regexp.MustCompile(`\{[^{}]*?(?:\.vtt|\.srt)[^{}]*?\}`)
-	blocks := blockRegex.FindAllString(bodyStr, -1)
+	combinedDatastr := htmlStr + "\n" + bodyStr
 
-	fileRegex := regexp.MustCompile(`"file"\s*:\s*"([^"]+)"`)
-	labelRegex := regexp.MustCompile(`"label"\s*:\s*"([^"]+)"`)
+	objectChunk := strings.Split(combinedDatastr, "}")
+	fileRegex := regexp.MustCompile(`(?i)(?:"|')?file(?:"|')?\s*:\s*(?:"|')([^"']+)(?:"|')`)
+	labelRegex := regexp.MustCompile(`(?i)(?:"|')?label(?:"|')?\s*:\s*(?:"|')([^"']+)(?:"|')`)
 
-	for _, block := range blocks {
-		fileMatch := fileRegex.FindStringSubmatch(block)
+	for _, chunk := range objectChunk {
+		fileMatch := fileRegex.FindStringSubmatch(chunk)
+
 		if len(fileMatch) > 1 {
 			subURL := strings.ReplaceAll(fileMatch[1], `\/`, `/`)
-			subLabel := "Unknown"
+			lowerUrl := strings.ToLower(subURL)
+			if !strings.Contains(lowerUrl, ".vtt") && !strings.Contains(lowerUrl, ".txt") && !strings.Contains(lowerUrl, ".srt") {
+				continue
+			}
 
-			labelMatch := labelRegex.FindStringSubmatch(block)
+			subLabel := "Unknown"
+			labelMatch := labelRegex.FindStringSubmatch(chunk)
 			if len(labelMatch) > 1 {
 				subLabel = labelMatch[1]
 			}
 
-			ext := filepath.Ext(subURL)
+			ext := "vtt"
+			if strings.Contains(lowerUrl, ".srt") {
+				ext = "srt"
+			} else if strings.Contains(lowerUrl, ".txt") {
+				ext = "txt"
+			}
 			var sizeKB float64
 
 			headReq, _ := http.NewRequest("HEAD", subURL, nil)
@@ -271,12 +302,46 @@ func extractJeniusPlayM3U8(iframeURL, refererURL string) (string, []SubtitleTrac
 				headResp.Body.Close()
 			}
 
-			subtitles = append(subtitles, SubtitleTrack{
-				URL:    subURL,
-				Label:  subLabel,
-				Format: strings.TrimPrefix(ext, "."),
-				SizeKB: sizeKB,
-			})
+			isDuplicate := false
+			for _, existingSub := range subtitles {
+				if existingSub.URL == subURL {
+					isDuplicate = true
+					break
+				}
+			}
+
+			if !isDuplicate {
+				subtitles = append(subtitles, SubtitleTrack{
+					URL:    subURL,
+					Label:  subLabel,
+					Format: strings.TrimPrefix(ext, "."),
+					SizeKB: sizeKB,
+				})
+			}
+		}
+	}
+
+	if len(subtitles) > 0 {
+		rawURLRegex := regexp.MustCompile(`(?i)https?:\/\/[^"'\s]+\.(?:vtt|srt|txt)`)
+		allURLs := rawURLRegex.FindAllString((combinedDatastr), -1)
+
+		for i, subURL := range allURLs {
+			cleanURL := strings.ReplaceAll(subURL, `\/`, `/`)
+			isDuplicate := false
+			for _, existingSub := range subtitles {
+				if existingSub.URL == cleanURL {
+					isDuplicate = true
+					break
+				}
+			}
+			if !isDuplicate {
+				subtitles = append(subtitles, SubtitleTrack{
+					URL:    cleanURL,
+					Label:  fmt.Sprint("Track_%", i+1),
+					Format: "Vtt",
+					SizeKB: 0,
+				})
+			}
 		}
 	}
 
