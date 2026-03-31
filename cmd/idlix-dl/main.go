@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -69,6 +70,8 @@ func main() {
 		os.Exit(1)
 	}
 	iframeURL, _ := decryptRes.Unwrap()
+
+	fmt.Printf("    -> Link Sumber %s\n", iframeURL)
 
 	fmt.Println("[3/6] Mengekstrak Master M3U8 dan Inspeksi Subtitle...")
 	masterM3U8, subtitles, err := extractJeniusPlayM3U8(iframeURL, *urlPtr)
@@ -166,8 +169,24 @@ func main() {
 }
 
 func extractJeniusPlayM3U8(iframeURL, refererURL string) (string, []SubtitleTrack, error) {
-	parts := strings.Split(strings.TrimRight(iframeURL, "/"), "/")
-	hash := parts[len(parts)-1]
+	parsedURL, err := url.Parse(iframeURL)
+	if err != nil {
+		return "", nil, fmt.Errorf("gagal membedah url iframe: %v", err)
+	}
+
+	var hash string
+
+	if parsedURL.Query().Has("data") {
+		hash = parsedURL.Query().Get("Data")
+	} else {
+		parts := strings.Split(strings.TrimRight(iframeURL, "/"), "/")
+		hash = parts[len(parts)-1]
+	}
+
+	if hash == "" || hash == "index.php" {
+		return "", nil, fmt.Errorf("Gagal mengekstrak ID hash dari URL iframeURL: %s", iframeURL)
+	}
+
 	jeniusAPI := "https://jeniusplay.com/player/index.php?data=" + hash + "&do=getVideo"
 	payload := "hash=" + hash + "&r=" + refererURL
 
@@ -188,7 +207,12 @@ func extractJeniusPlayM3U8(iframeURL, refererURL string) (string, []SubtitleTrac
 	}
 	defer resp.Body.Close()
 
+	fmt.Printf("   -> Header Server: ContentLength = %v, Content-Type = %v\n", resp.Header.Get("Content-Length"), resp.Header.Get("Content-Type"))
+
 	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 {
+		return "", nil, fmt.Errorf("server memberikan silent drop (body kosong). WAF kemungkinan memblokir finger print bot")
+	}
 	bodyStr := string(body)
 
 	var masterM3U8 string
@@ -201,7 +225,13 @@ func extractJeniusPlayM3U8(iframeURL, refererURL string) (string, []SubtitleTrac
 		if len(fallbackMatch) > 1 {
 			masterM3U8 = fallbackMatch[1]
 		} else {
-			return "", nil, fmt.Errorf("URL m3u8 tidak ditemukan. Respons Server: %s...", bodyStr[:min(100, len(bodyStr))])
+			debugFilename := "debug_error_fase3.html"
+			errDump := os.WriteFile(debugFilename, body, 0o644)
+			if errDump != nil {
+				return "", nil, fmt.Errorf("URL m3u8 tidak ditemukan dan gagal menulis debug", errDump)
+			}
+			return "", nil, fmt.Errorf("URL M3U8 tidak ditemukan. Respons mentah server telah disalin ke %s", debugFilename)
+			// return "", nil, fmt.Errorf("URL m3u8 tidak ditemukan. Respons Server: %s...", bodyStr[:min(100, len(bodyStr))])
 		}
 	}
 
