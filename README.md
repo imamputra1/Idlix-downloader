@@ -31,7 +31,7 @@ Menampilkan indikator kecepatan I/O dan persentase unduhan.
 
 **3. Tampilan Hasil Pengunduhan**
 Menampilkan lokasi penyimpanan dan pemutaran film.
-![DOWNLOAD SUCCESS](assets/wd_succ.png)
+![DOWNLOAD SUCCESS](assets/dw_succ.png)
 
 ---
 
