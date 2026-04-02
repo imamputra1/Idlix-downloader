@@ -19,7 +19,7 @@
 * **A La Carte Selection:** Kontrol penuh atas resolusi video mana yang ingin diunduh dan bahasa *subtitle* spesifik yang ingin disimpan (*Sidecar Subtitles*).
 
 ---
-## 📸 Tangkapan Layar (Screenshots)
+## Tangkapan Layar (Screenshots)
 
 **1. Tampilan Mode Pratinjau (Preview Mode)**
 Menampilkan katalog resolusi video dan subtitle sebelum mengunduh.
